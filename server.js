@@ -136,6 +136,51 @@ function createAuthProfile(destDir, profileName = 'default') {
   log('Profile ready.');
 }
 
+// Write-back: the exact inverse of the overlay in ensureTemplate().
+//
+// Contexts are throwaway copies and cleanupEntry() rmSync's them on close, so any login
+// performed inside a context is DESTROYED unless it is saved back to its named profile
+// first. This is that save. Call it only after the browser context has been closed —
+// Chromium buffers cookies and local storage and only guarantees a flush to disk on close.
+//
+// Never overwrites blind: whatever is already in the profile is copied to a timestamped
+// .bak- directory inside it before being replaced.
+function saveAuthProfile(contextDir, prof) {
+  const written = [];
+  const absent = [];
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupDir = path.join(prof.path, `.bak-${stamp}`);
+  let backedUp = false;
+
+  fs.mkdirSync(prof.path, { recursive: true });
+
+  for (const f of AUTH_FILES) {
+    const src = path.join(contextDir, f);
+    const dst = path.join(prof.path, f);
+
+    if (!fs.existsSync(src)) { absent.push(f); continue; }
+
+    if (fs.existsSync(dst)) {
+      const bak = path.join(backupDir, f);
+      fs.mkdirSync(path.dirname(bak), { recursive: true });
+      if (fs.statSync(dst).isDirectory()) fs.cpSync(dst, bak, { recursive: true });
+      else fs.copyFileSync(dst, bak);
+      backedUp = true;
+    }
+
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    if (fs.statSync(src).isDirectory()) {
+      fs.rmSync(dst, { recursive: true, force: true });
+      fs.cpSync(src, dst, { recursive: true, force: true });
+    } else {
+      fs.copyFileSync(src, dst);
+    }
+    written.push(f);
+  }
+
+  return { written, absent, backupDir: backedUp ? backupDir : null };
+}
+
 // --- Find a free port for CDP ---
 async function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -231,6 +276,22 @@ const poolToolSchemas = [
     description: 'Switch the active browser context. All browser_* tools will operate on this context. For switching between tabs in the same window, use browser_tabs instead.',
     inputSchema: mcpBundle.z.object({
       id: mcpBundle.z.string().describe('Context ID to make active'),
+    }),
+    type: 'input',
+  },
+  {
+    name: 'pool_save_profile',
+    title: 'Save login to profile',
+    description:
+      'Persist the logins in a browser context back to a named profile so they survive this session. ' +
+      'Contexts are throwaway copies and are DELETED on close, so a sign-in performed in a context is lost ' +
+      'unless saved with this tool. Run it immediately after completing a login, while the context is still open. ' +
+      'The context is closed as part of saving — Chromium only guarantees cookies and local storage are flushed ' +
+      'to disk on close. The profile\'s previous contents are backed up to a timestamped .bak- folder inside it, ' +
+      'never overwritten blind. Window-mode contexts only.',
+    inputSchema: mcpBundle.z.object({
+      profileName: mcpBundle.z.string().describe('Profile to write the logins into, e.g. "chatgpt". Created if absent.'),
+      id: mcpBundle.z.string().optional().describe('Context ID to save (default: the active context)'),
     }),
     type: 'input',
   },
@@ -1329,6 +1390,68 @@ async function handlePoolClose(params) {
   return { content: [{ type: 'text', text: `Closed "${id}".` }] };
 }
 
+async function handlePoolSaveProfile(params) {
+  const id = params.id || activeId;
+  if (!id) {
+    return { content: [{ type: 'text', text: 'No active browser context to save. Use pool_launch first.' }], isError: true };
+  }
+
+  const entry = poolEntries.get(id);
+  if (!entry) {
+    return {
+      content: [{ type: 'text', text: `Context "${id}" not found. Active: ${[...poolEntries.keys()].join(', ') || 'none'}` }],
+      isError: true,
+    };
+  }
+
+  if (entry.mode !== 'window') {
+    return {
+      content: [{ type: 'text', text:
+        `Context "${id}" is tab-mode and shares one profile directory with every other tab, so saving it ` +
+        `would capture unrelated sessions too. Relaunch with mode:"window" to save a login.` }],
+      isError: true,
+    };
+  }
+
+  const contextDir = entry.contextDir;
+  if (!contextDir || !fs.existsSync(contextDir)) {
+    return { content: [{ type: 'text', text: `Context "${id}" has no profile directory on disk.` }], isError: true };
+  }
+
+  const prof = resolveProfile(params.profileName);
+
+  // Close the browser BEFORE copying. Chromium buffers cookies and local storage in memory and
+  // only guarantees a flush to disk on close, so copying a live context captures stale auth.
+  log(`Flushing context "${id}" before saving to profile "${prof.name}"...`);
+  try { entry.backend.serverClosed?.(); } catch {}
+  await entry.browserContext.close().catch(() => {});
+
+  let result;
+  try {
+    result = saveAuthProfile(contextDir, prof);
+  } catch (error) {
+    await cleanupEntry(id);
+    return { content: [{ type: 'text', text: `Save failed: ${error.message}` }], isError: true };
+  }
+
+  // Drop the cached template so the next launch rebuilds from the snapshot just written.
+  templateDirs.delete(prof.name);
+  await cleanupEntry(id);
+
+  const accounts = profileAccounts(prof.path);
+  const lines = [
+    `Saved logins from "${id}" to profile "${prof.name}".`,
+    `  profile path: ${prof.path}`,
+    `  auth items written: ${result.written.length}` +
+      (result.absent.length ? ` (${result.absent.length} not present in context)` : ''),
+  ];
+  if (result.backupDir) lines.push(`  previous snapshot backed up to: ${result.backupDir}`);
+  if (accounts.length) lines.push(`  accounts in profile: ${accounts.join(', ')}`);
+  lines.push(`  context "${id}" is now closed; pool_launch profileName:"${prof.name}" will start signed in.`);
+
+  return { content: [{ type: 'text', text: lines.join('\n') }] };
+}
+
 async function handlePoolList() {
   if (poolEntries.size === 0) {
     return {
@@ -1561,6 +1684,15 @@ class PoolCompositeBackend {
         return await handlePoolSwitch(parsed);
       } catch (error) {
         return { content: [{ type: 'text', text: `Error switching: ${error.message}` }], isError: true };
+      }
+    }
+
+    if (name === 'pool_save_profile') {
+      const parsed = poolToolSchemas[4].inputSchema.parse(rawArguments || {});
+      try {
+        return await handlePoolSaveProfile(parsed);
+      } catch (error) {
+        return { content: [{ type: 'text', text: `Error saving profile: ${error.message}` }], isError: true };
       }
     }
 
