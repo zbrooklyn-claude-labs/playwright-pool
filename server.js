@@ -7,6 +7,7 @@
 // (pool_launch, pool_close, pool_list) with golden profile auth overlay and
 // UUID session isolation.
 
+import { AsyncLocalStorage } from 'async_hooks';
 import crypto from 'crypto';
 import fs from 'fs';
 import net from 'net';
@@ -40,6 +41,10 @@ const POOL_DIR = process.env.POOL_DIR || path.join(HOME, '.playwright-pool', 'po
 // Unique session ID — ensures no conflicts between concurrent sessions
 const SESSION_ID = crypto.randomUUID().slice(0, 8);
 
+// POOL_HEADLESS=1 launches every browser hidden: for tests and proofs, never for real use
+// (Google refuses sign-in to hidden browsers).
+const HEADLESS = process.env.POOL_HEADLESS === '1';
+
 // --- Logging ---
 function log(msg) {
   process.stderr.write(`[pool:${SESSION_ID}] ${msg}\n`);
@@ -51,7 +56,15 @@ let activeId = null;
 let tabContext = null; // Shared BrowserContext for tab mode
 let tabContextDir = null;
 let tabBackend = null; // Single backend for all tab-mode entries
+let tabCdpPort = null; // Debug port of the shared tab window
 let nextId = 1;
+
+// Several callers share one server (a chat and its agents). A call may name the context it means
+// (`context` on any tool but pool_launch/pool_list); the call then runs against that context, carried
+// through to every handler by callTarget. A call naming none uses the active context, as before.
+const callTarget = new AsyncLocalStorage();
+const currentId = () => callTarget.getStore() ?? activeId;
+const UNTARGETED = new Set(['pool_launch', 'pool_list']);
 
 // --- Auth overlay constants ---
 const AUTH_FILES = [
@@ -660,10 +673,11 @@ async function handleMouseWheel(params) {
 
 // --- Audit tool helper: get active page ---
 function getActivePage() {
-  if (!activeId || !poolEntries.has(activeId)) {
+  const id = currentId();
+  if (!id || !poolEntries.has(id)) {
     throw new Error('No active browser context. Use pool_launch to create one first.');
   }
-  const entry = poolEntries.get(activeId);
+  const entry = poolEntries.get(id);
   const pages = entry.browserContext.pages();
   if (pages.length === 0) {
     throw new Error('No pages open in the active browser context.');
@@ -1020,8 +1034,8 @@ async function handleWorkflowAuditPage(params) {
 
   // Use the active pool page if available, otherwise launch standalone
   let page, browser, standalone = false;
-  if (activeId && poolEntries.has(activeId)) {
-    const entry = poolEntries.get(activeId);
+  if (currentId() && poolEntries.has(currentId())) {
+    const entry = poolEntries.get(currentId());
     const ctx = entry.browserContext;
     if (ctx) {
       const pages = ctx.pages();
@@ -1173,8 +1187,8 @@ async function handleWorkflowInspect(params) {
 
   // Use the active pool page if available, otherwise launch standalone
   let page, browser, standalone = false;
-  if (activeId && poolEntries.has(activeId)) {
-    const entry = poolEntries.get(activeId);
+  if (currentId() && poolEntries.has(currentId())) {
+    const entry = poolEntries.get(currentId());
     const ctx = entry.browserContext;
     if (ctx) {
       const pages = ctx.pages();
@@ -1280,8 +1294,9 @@ async function handlePoolLaunch(params) {
       tabContextDir = path.join(POOL_DIR, `${SESSION_ID}-tabs`);
       createAuthProfile(tabContextDir, profileName);
       const cdpPort = await findFreePort();
+      tabCdpPort = cdpPort;
       tabContext = await chromium.launchPersistentContext(tabContextDir, {
-        headless: false,
+        headless: HEADLESS,
         viewport: null,
         args: [
           '--disable-blink-features=AutomationControlled',
@@ -1318,6 +1333,7 @@ async function handlePoolLaunch(params) {
       label: params.label || id,
       browserContext,
       tabIndex,
+      cdpPort: tabCdpPort,
     });
   } else {
     // Window mode — separate persistent context with its own backend
@@ -1327,7 +1343,7 @@ async function handlePoolLaunch(params) {
 
     // Build context options, merging device preset if provided
     const contextLaunchOptions = {
-      headless: false,
+      headless: HEADLESS,
       viewport: { width: vw, height: vh },
       args: [
         '--disable-blink-features=AutomationControlled',
@@ -1351,6 +1367,7 @@ async function handlePoolLaunch(params) {
       mode,
       label: params.label || id,
       browserContext,
+      cdpPort,
     });
   }
 
@@ -1364,7 +1381,8 @@ async function handlePoolLaunch(params) {
   return {
     content: [{
       type: 'text',
-      text: `${idLine}\nCreated ${mode} "${id}"${params.label ? ` [${params.label}]` : ''}${deviceSuffix} (${vw}x${vh})\nThis is now the active context. All browser_* tools will operate on it.`,
+      text: `${idLine}\nCreated ${mode} "${id}"${params.label ? ` [${params.label}]` : ''}${deviceSuffix} (${vw}x${vh})\nThis is now the active context. All browser_* tools will operate on it, or pass context: "${id}" to any tool to reach it whatever is active.
+Debug port: ${poolEntries.get(id).cdpPort}`,
     }],
   };
 }
@@ -1391,7 +1409,7 @@ async function handlePoolClose(params) {
 }
 
 async function handlePoolSaveProfile(params) {
-  const id = params.id || activeId;
+  const id = params.id || currentId();
   if (!id) {
     return { content: [{ type: 'text', text: 'No active browser context to save. Use pool_launch first.' }], isError: true };
   }
@@ -1591,6 +1609,25 @@ async function cleanupAll() {
   log('Cleanup complete.');
 }
 
+// Every tool but pool_launch/pool_list takes an optional `context`.
+function withContextArg(tool) {
+  if (UNTARGETED.has(tool.name)) return tool;
+  const schema = tool.inputSchema ?? { type: 'object', properties: {} };
+  return {
+    ...tool,
+    inputSchema: {
+      ...schema,
+      properties: {
+        ...(schema.properties ?? {}),
+        context: {
+          type: 'string',
+          description: 'Context ID (from pool_launch) this call is for. Default: the active context.',
+        },
+      },
+    },
+  };
+}
+
 // --- Composite Backend ---
 // Implements the same interface as BrowserServerBackend (listTools, callTool,
 // initialize, serverClosed) but adds pool tools and delegates browser tools
@@ -1639,10 +1676,23 @@ class PoolCompositeBackend {
     // Official browser tools (full list)
     const browserTools = this._browserToolList || [];
 
-    return [...poolTools, ...auditToolsA, ...auditToolsB, ...utilityTools, ...customTools, ...browserTools];
+    return [...poolTools, ...auditToolsA, ...auditToolsB, ...utilityTools, ...customTools, ...browserTools].map(withContextArg);
   }
 
+  // A call naming a context runs against it (see callTarget); the name is taken off the arguments
+  // before any handler's own schema reads them.
   async callTool(name, rawArguments, progress) {
+    const context = rawArguments?.context;
+    if (context === undefined || UNTARGETED.has(name)) return this._callTool(name, rawArguments, progress);
+    const { context: _, ...rest } = rawArguments;
+    if (typeof context !== 'string' || !poolEntries.has(context)) {
+      const open = [...poolEntries.keys()].join(', ') || 'none';
+      return { content: [{ type: 'text', text: `Context "${context}" not found. Open: ${open}` }], isError: true };
+    }
+    return callTarget.run(context, () => this._callTool(name, rest, progress));
+  }
+
+  async _callTool(name, rawArguments, progress) {
     // Pool tools
     if (name === 'pool_launch') {
       const parsed = poolToolSchemas[0].inputSchema.parse(rawArguments || {});
@@ -1724,11 +1774,11 @@ class PoolCompositeBackend {
 
     // Audit tools batch B (from audit-tools-b.js)
     if (isAuditToolB(name)) {
-      if (!activeId || !poolEntries.has(activeId)) {
+      if (!currentId() || !poolEntries.has(currentId())) {
         return { content: [{ type: 'text', text: 'No active browser context. Use pool_launch first.' }], isError: true };
       }
       try {
-        return await handleAuditToolB(name, rawArguments || {}, poolEntries.get(activeId));
+        return await handleAuditToolB(name, rawArguments || {}, poolEntries.get(currentId()));
       } catch (error) {
         return { content: [{ type: 'text', text: `Error in ${name}: ${error.message}` }], isError: true };
       }
@@ -1787,14 +1837,14 @@ class PoolCompositeBackend {
     // Intercept browser_close — redirect to pool_close for the active context
     // so the actual browser process is cleaned up properly.
     if (name === 'browser_close') {
-      if (!activeId) {
+      if (!currentId()) {
         return { content: [{ type: 'text', text: 'No active browser context to close.' }], isError: true };
       }
-      return handlePoolClose({ id: activeId });
+      return handlePoolClose({ id: currentId() });
     }
 
-    // Browser tools — delegate to active backend
-    if (!activeId || !poolEntries.has(activeId)) {
+    // Browser tools — delegate to the called (or active) context's backend
+    if (!currentId() || !poolEntries.has(currentId())) {
       return {
         content: [{
           type: 'text',
@@ -1804,7 +1854,7 @@ class PoolCompositeBackend {
       };
     }
 
-    const entry = poolEntries.get(activeId);
+    const entry = poolEntries.get(currentId());
 
     // Intercept screenshots: let upstream take it, then save to disk + strip base64
     // Prevents 20MB+ context crashes from accumulated inline image data

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (branch fix/per-caller-context)
+
+### Fixed
+- **Calls from several callers landed in whichever browser was launched last.** A chat and its agents share one server and one "active context"; agent A's actions went into agent B's browser while both reported success (proof: Clawtomods spike S5, 2026-10-06). Every tool except `pool_launch`/`pool_list` now takes an optional `context` (a context id); the call runs against that context. A call without one behaves as before.
+
+### Added
+- `pool_launch` reports `Debug port: <n>`, so a viewer can link a context to its browser.
+- `POOL_HEADLESS=1` launches browsers hidden, for tests and proofs.
+- `tests/context-routing.test.js`: two browsers, calls by context, checked against each browser's own debug port.
+
 ## 4.2.2 — 2026-04-22
 
 ### Added
