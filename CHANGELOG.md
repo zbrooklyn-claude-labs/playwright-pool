@@ -9,6 +9,7 @@
 - `pool_launch` reports `Debug port: <n>`, so a viewer can link a context to its browser.
 - `POOL_HEADLESS=1` launches browsers hidden, for tests and proofs.
 - `tests/context-routing.test.js`: two browsers, calls by context, checked against each browser's own debug port.
+- **Leftover sweep (`lib/sweep.js`).** Each server writes `<session>.owner.json` (its pid) into `POOL_DIR` at start and removes it on exit. At start it removes the folders of sessions whose owner file names a process that is gone. Folders with no owner file (made by servers before this change) are kept and counted in the log; removing those is a person's decision (on 2026-10-06: 808 folders, 174 sessions, 33.6 GB, all copies of signed-in profiles).
 
 ## 4.2.2 — 2026-04-22
 

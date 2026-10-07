@@ -18,6 +18,7 @@ import { createRequire } from 'module';
 import { getSchemas as getAuditBSchemas, handleAuditTool as handleAuditToolB, isAuditToolB } from './audit-tools-b.js';
 import { AUDIT_HANDLERS } from './cli-commands/audit.js';
 import { resolveProfile, profileAccounts } from './lib/profiles.js';
+import { planSweep, sweepLeftovers, writeOwner } from './lib/sweep.js';
 
 // --- Resolve internal Playwright MCP modules ---
 // playwright/lib/mcp is not exported in package.json, so we resolve the
@@ -1902,6 +1903,19 @@ const transport = new mcpBundle.StdioServerTransport();
 await server.connect(transport);
 
 log('Ready. Use pool_launch to create a browser context, then use any browser_* tool.');
+
+// Say which process owns this session's folders, then clear folders of servers that died without
+// cleaning up (only those whose owner file proves it; see lib/sweep.js). Off the start path.
+try { writeOwner(POOL_DIR, SESSION_ID); } catch (err) { log(`Owner file not written: ${err.message}`); }
+setTimeout(() => {
+  try {
+    const { removed, failed } = sweepLeftovers(POOL_DIR, SESSION_ID);
+    const { legacy } = planSweep(POOL_DIR, SESSION_ID, { measure: false });
+    log(`Sweep: removed ${removed} abandoned item(s)${failed.length ? `, ${failed.length} still in use` : ''}; ${legacy.length} older folder(s) without an owner file kept.`);
+  } catch (err) {
+    log(`Sweep skipped: ${err.message}`);
+  }
+}, 3000).unref();
 
 // --- Cleanup on exit ---
 async function shutdown() {
