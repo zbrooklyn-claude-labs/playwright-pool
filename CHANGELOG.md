@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Windows open minimized** (Edward, 2026-10-12: "they always start off minimized, so I don't have to keep minimizing them while I'm working"). `--start-minimized` is ignored by Playwright's headed Chromium (measured: windowState stayed `normal`), so `minimizeWindow()` minimizes each new window through `Browser.setWindowBounds` right after launch, and three `--disable-*backgrounding/throttling` flags keep a minimized page rendering (measured: state `minimized`, timers ticking, screenshot OK). `POOL_START_VISIBLE=1` opens windows normally. Takes effect when the MCP host restarts.
+
 ## 4.2.2 — 2026-04-22
 
 ### Added

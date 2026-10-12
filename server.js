@@ -40,6 +40,28 @@ const POOL_DIR = process.env.POOL_DIR || path.join(HOME, '.playwright-pool', 'po
 // Unique session ID — ensures no conflicts between concurrent sessions
 const SESSION_ID = crypto.randomUUID().slice(0, 8);
 
+// Windows open MINIMIZED (Edward, 2026-10-12: "they always start off minimized, so I don't have to keep
+// minimizing them while I'm working"). `--start-minimized` is ignored by Playwright's headed Chromium
+// (measured: windowState stayed "normal"), so each window is minimized through the browser's own window API
+// right after it opens (measured: "minimized", timers ticking, screenshots fine). The three --disable-* flags
+// stop Chromium from pausing a minimized or covered page. POOL_START_VISIBLE=1 opens them normally.
+const START_VISIBLE = process.env.POOL_START_VISIBLE === '1';
+const WINDOW_STATE_ARGS = START_VISIBLE ? [] : [
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-background-timer-throttling',
+];
+async function minimizeWindow(ctx) {
+  if (START_VISIBLE) return;
+  try {
+    const page = ctx.pages()[0] || await ctx.newPage();
+    const cdp = await ctx.newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    await cdp.detach().catch(() => {});
+  } catch (e) { /* a window that cannot be minimized is still a working window */ }
+}
+
 // --- Logging ---
 function log(msg) {
   process.stderr.write(`[pool:${SESSION_ID}] ${msg}\n`);
@@ -1289,9 +1311,11 @@ async function handlePoolLaunch(params) {
         args: [
           '--disable-blink-features=AutomationControlled',
           `--remote-debugging-port=${cdpPort}`,
+          ...WINDOW_STATE_ARGS,
         ],
       });
       log('Tab context initialized.');
+      await minimizeWindow(tabContext);
 
       // Create a single shared backend for all tab entries
       tabBackend = await createBackendForContext(tabContext);
@@ -1335,6 +1359,7 @@ async function handlePoolLaunch(params) {
       args: [
         '--disable-blink-features=AutomationControlled',
         `--remote-debugging-port=${cdpPort}`,
+        ...WINDOW_STATE_ARGS,
       ],
     };
     // Apply device emulation options (userAgent, deviceScaleFactor, isMobile, hasTouch, screen)
@@ -1345,6 +1370,7 @@ async function handlePoolLaunch(params) {
     if (deviceOptions.screen) contextLaunchOptions.screen = deviceOptions.screen;
 
     browserContext = await chromium.launchPersistentContext(contextDir, contextLaunchOptions);
+    await minimizeWindow(browserContext);
 
     backend = await createBackendForContext(browserContext);
 
