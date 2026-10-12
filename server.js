@@ -213,7 +213,10 @@ async function createBackendForContext(browserContext) {
     // Optimize MCP response size for token efficiency:
     // - incremental snapshots show only changes (not full tree every time)
     // - codegen: 'none' removes "Ran Playwright code" section from responses
-    snapshot: { mode: 'incremental' },
+    // POOL_SNAPSHOT_MODE=none returns only what a script returns (no page tree after each action); use
+    // snapshot_compact when refs are needed. Default stays incremental. Retro 2026-10-11: whole pages and a
+    // browser-autofilled password were printed back into the chat by the automatic snapshot.
+    snapshot: { mode: ['incremental', 'full', 'none'].includes(process.env.POOL_SNAPSHOT_MODE) ? process.env.POOL_SNAPSHOT_MODE : 'incremental' },
     codegen: 'none',
   });
 
