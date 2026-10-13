@@ -46,6 +46,11 @@ const SESSION_ID = crypto.randomUUID().slice(0, 8);
 // right after it opens (measured: "minimized", timers ticking, screenshots fine). The three --disable-* flags
 // stop Chromium from pausing a minimized or covered page. POOL_START_VISIBLE=1 opens them normally.
 const START_VISIBLE = process.env.POOL_START_VISIBLE === '1';
+// Chrome's "password found in a data breach" check opens a dialog that swallows page mouse input in headed and new-headless windows after a
+// login with a flagged password (measured 2026-10-13: clicks land 0/5 by default, 5/5 with the lookup host unreachable). Making that one Google
+// hostname unreachable for the AGENT's browser process turns the lookup off without writing any profile setting; it applies only to browsers this
+// server launches, never to Edward's own Chrome/Edge. POOL_KEEP_LEAK_CHECK=1 opts out.
+const LEAK_CHECK_ARGS = process.env.POOL_KEEP_LEAK_CHECK === '1' ? [] : ['--host-resolver-rules=MAP passwordsleakcheck-pa.googleapis.com ~NOTFOUND'];
 const WINDOW_STATE_ARGS = START_VISIBLE ? [] : [
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
@@ -1312,6 +1317,7 @@ async function handlePoolLaunch(params) {
           '--disable-blink-features=AutomationControlled',
           `--remote-debugging-port=${cdpPort}`,
           ...WINDOW_STATE_ARGS,
+          ...LEAK_CHECK_ARGS,
         ],
       });
       log('Tab context initialized.');
@@ -1360,6 +1366,7 @@ async function handlePoolLaunch(params) {
         '--disable-blink-features=AutomationControlled',
         `--remote-debugging-port=${cdpPort}`,
         ...WINDOW_STATE_ARGS,
+        ...LEAK_CHECK_ARGS,
       ],
     };
     // Apply device emulation options (userAgent, deviceScaleFactor, isMobile, hasTouch, screen)
