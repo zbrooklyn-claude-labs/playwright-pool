@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed (2026-10-13, approved by Edward; evidence in Brain artifacts/browser-architecture-2026-10-13/)
+- **Windows now open fully visible** (reverses the 2026-10-12 minimized default below). `POOL_START_MINIMIZED=1` restores the minimized start; `POOL_START_VISIBLE` no longer has an effect (visible is the default). The three anti-throttling flags are always passed, so a window that is minimized or covered by hand keeps working.
+- **Navigation wait is 30 s** (was Playwright's 60 s); action wait stays 5 s. A wrong `waitForURL` no longer stalls the pool for a minute.
+- **Chrome's password-breach lookup is turned off for browsers this server launches** (launch flag `--host-resolver-rules=MAP passwordsleakcheck-pa.googleapis.com ~NOTFOUND`, no profile write; never applied to a personal Chrome/Edge). After a login with a flagged password the breach dialog used to swallow every later page click. `POOL_KEEP_LEAK_CHECK=1` opts out.
+
+### Added
+- **Opt-in headless mode:** `POOL_HEADLESS=1` launches new headless `chrome.exe` (so the Browser Agent Monitor still discovers it). Headed stays the default.
+- **`tests/acceptance/pool-patch.acceptance.test.js`:** static checks, timeout behaviour, session isolation and saved-login reuse, breach-check click test with a negative control, window default, and flag scope. Headed tests run with `ACCEPT_HEADED=1`.
+
 ### Changed
 - **Windows open minimized** (Edward, 2026-10-12: "they always start off minimized, so I don't have to keep minimizing them while I'm working"). `--start-minimized` is ignored by Playwright's headed Chromium (measured: windowState stayed `normal`), so `minimizeWindow()` minimizes each new window through `Browser.setWindowBounds` right after launch, and three `--disable-*backgrounding/throttling` flags keep a minimized page rendering (measured: state `minimized`, timers ticking, screenshot OK). `POOL_START_VISIBLE=1` opens windows normally. Takes effect when the MCP host restarts.
 
