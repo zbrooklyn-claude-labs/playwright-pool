@@ -40,12 +40,10 @@ const POOL_DIR = process.env.POOL_DIR || path.join(HOME, '.playwright-pool', 'po
 // Unique session ID — ensures no conflicts between concurrent sessions
 const SESSION_ID = crypto.randomUUID().slice(0, 8);
 
-// Windows open MINIMIZED (Edward, 2026-10-12: "they always start off minimized, so I don't have to keep
-// minimizing them while I'm working"). `--start-minimized` is ignored by Playwright's headed Chromium
-// (measured: windowState stayed "normal"), so each window is minimized through the browser's own window API
-// right after it opens (measured: "minimized", timers ticking, screenshots fine). The three --disable-* flags
-// stop Chromium from pausing a minimized or covered page. POOL_START_VISIBLE=1 opens them normally.
-const START_VISIBLE = process.env.POOL_START_VISIBLE === '1';
+// Windows open FULLY VISIBLE (Edward, 2026-10-13: normal everyday browsing is visible, not minimized; he can still minimize any window by hand).
+// This reverses the 2026-10-12 default (windows opened minimized). POOL_START_MINIMIZED=1 brings the minimized start back. The three --disable-* flags
+// are always passed now: they only stop Chromium from pausing a page that is covered or minimized, so a window Edward minimizes or buries keeps working.
+const START_VISIBLE = process.env.POOL_START_MINIMIZED !== '1';
 // Chrome's "password found in a data breach" check opens a dialog that swallows page mouse input in headed and new-headless windows after a
 // login with a flagged password (measured 2026-10-13: clicks land 0/5 by default, 5/5 with the lookup host unreachable). Making that one Google
 // hostname unreachable for the AGENT's browser process turns the lookup off without writing any profile setting; it applies only to browsers this
@@ -54,7 +52,7 @@ const START_VISIBLE = process.env.POOL_START_VISIBLE === '1';
 const POOL_HEADLESS = process.env.POOL_HEADLESS === '1';
 const HEADLESS_OPTS = POOL_HEADLESS ? { headless: true, channel: 'chromium' } : { headless: false };
 const LEAK_CHECK_ARGS = process.env.POOL_KEEP_LEAK_CHECK === '1' ? [] : ['--host-resolver-rules=MAP passwordsleakcheck-pa.googleapis.com ~NOTFOUND'];
-const WINDOW_STATE_ARGS = START_VISIBLE ? [] : [
+const WINDOW_STATE_ARGS = [
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
   '--disable-background-timer-throttling',
