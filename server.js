@@ -245,6 +245,9 @@ async function createBackendForContext(browserContext) {
     // browser-autofilled password were printed back into the chat by the automatic snapshot.
     snapshot: { mode: ['incremental', 'full', 'none'].includes(process.env.POOL_SNAPSHOT_MODE) ? process.env.POOL_SNAPSHOT_MODE : 'incremental' },
     codegen: 'none',
+    // Wait limits (measured 2026-10-13): navigation 30 s (was Playwright's 60 s; a wrong waitForURL stalled the pool for 60 s, real pages load in <= 10 s);
+    // action stays 5 s (a model can pass a longer per-call timeout for a known-slow step).
+    timeouts: { action: 5000, navigation: 30000 },
   });
 
   const factory = {
