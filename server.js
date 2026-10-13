@@ -50,6 +50,9 @@ const START_VISIBLE = process.env.POOL_START_VISIBLE === '1';
 // login with a flagged password (measured 2026-10-13: clicks land 0/5 by default, 5/5 with the lookup host unreachable). Making that one Google
 // hostname unreachable for the AGENT's browser process turns the lookup off without writing any profile setting; it applies only to browsers this
 // server launches, never to Edward's own Chrome/Edge. POOL_KEEP_LEAK_CHECK=1 opts out.
+// Opt-in headless for large unattended batches (default stays headed/visible). New headless Chrome (chrome.exe), not chrome-headless-shell, so the Agent Browser Monitor still finds it.
+const POOL_HEADLESS = process.env.POOL_HEADLESS === '1';
+const HEADLESS_OPTS = POOL_HEADLESS ? { headless: true, channel: 'chromium' } : { headless: false };
 const LEAK_CHECK_ARGS = process.env.POOL_KEEP_LEAK_CHECK === '1' ? [] : ['--host-resolver-rules=MAP passwordsleakcheck-pa.googleapis.com ~NOTFOUND'];
 const WINDOW_STATE_ARGS = START_VISIBLE ? [] : [
   '--disable-backgrounding-occluded-windows',
@@ -1314,7 +1317,7 @@ async function handlePoolLaunch(params) {
       createAuthProfile(tabContextDir, profileName);
       const cdpPort = await findFreePort();
       tabContext = await chromium.launchPersistentContext(tabContextDir, {
-        headless: false,
+        ...HEADLESS_OPTS,
         viewport: null,
         args: [
           '--disable-blink-features=AutomationControlled',
@@ -1363,7 +1366,7 @@ async function handlePoolLaunch(params) {
 
     // Build context options, merging device preset if provided
     const contextLaunchOptions = {
-      headless: false,
+      ...HEADLESS_OPTS,
       viewport: { width: vw, height: vh },
       args: [
         '--disable-blink-features=AutomationControlled',
