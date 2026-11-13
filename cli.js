@@ -320,6 +320,7 @@ async function cmdLogin(url, profileName = 'default') {
     `--user-data-dir=${prof.path}`,
     '--no-first-run',
     '--no-default-browser-check',
+    '--start-maximized',
     targetUrl,
   ], { stdio: 'ignore', detached: false });
 
